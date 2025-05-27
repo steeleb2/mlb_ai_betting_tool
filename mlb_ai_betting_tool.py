@@ -67,9 +67,12 @@ def run_mlb_betr_model(lineups, weather, matchups, historic_data):
 
     # Output sort and type
     merged = merged.sort_values('Win %', ascending=False).reset_index(drop=True)
-    merged['Type'] = ['Best Play']*15 + ['Longshot']*10 + ['Other']*(len(merged)-25)
-    merged.loc[merged.index >= 15, 'Type'] = 'Longshot'
-    merged.loc[merged.index >= 25, 'Type'] = 'Other'
+merged['Type'] = ""
+n = len(merged)
+merged.loc[merged.index < 15, 'Type'] = "Best Play"
+merged.loc[(merged.index >= 15) & (merged.index < 25), 'Type'] = "Longshot"
+merged.loc[merged.index >= 25, 'Type'] = "Other"
+
 
     # Pad out to 25 for demo
     while len(merged) < 25:
