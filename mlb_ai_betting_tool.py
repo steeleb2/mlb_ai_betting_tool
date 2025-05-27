@@ -71,13 +71,20 @@ def scrape_prizepicks_mlb_props_html():
     """
     url = "https://www.prizepicks.com/lines/mlb"
     headers = {
-        "User-Agent": "Mozilla/5.0"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1"
     }
-    resp = requests.get(url, headers=headers)
-    if resp.status_code != 200:
-        st.warning("Could not reach PrizePicks (web scrape).")
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+    except Exception as e:
+        st.error(f"Failed to fetch PrizePicks: {e}")
         return pd.DataFrame()
-    # Find embedded JSON data (window.__NUXT__ in <script> tag)
+    if resp.status_code != 200:
+        st.warning(f"Could not reach PrizePicks (status code {resp.status_code}).")
+        return pd.DataFrame()
     soup = BeautifulSoup(resp.text, "lxml")
     scripts = soup.find_all("script")
     data_script = None
@@ -89,16 +96,13 @@ def scrape_prizepicks_mlb_props_html():
         st.warning("PrizePicks page structure changed—no JSON found.")
         return pd.DataFrame()
     try:
-        # Extract the JSON substring
         json_data = data_script.split("window.__NUXT__=")[-1]
         if json_data.endswith(";"):
             json_data = json_data[:-1]
         data = json.loads(json_data)
-    except Exception:
-        st.warning("Failed to parse PrizePicks embedded JSON.")
+    except Exception as e:
+        st.warning(f"Failed to parse PrizePicks embedded JSON: {e}")
         return pd.DataFrame()
-
-    # Traverse data structure to get MLB props
     player_props = []
     try:
         projections = data['state']['projections']
@@ -112,7 +116,6 @@ def scrape_prizepicks_mlb_props_html():
                 stat_type = proj['attributes']['stat_type']
                 line_score = proj['attributes']['line_score']
                 opp_team = proj['attributes'].get('description', '')
-                # Filter for the props you want
                 if stat_type in ['HITS', 'HOMERUNS', 'TOTAL_BASES', 'STRIKEOUTS']:
                     player_props.append({
                         'Player': player_name,
@@ -124,13 +127,13 @@ def scrape_prizepicks_mlb_props_html():
                     })
             except Exception:
                 continue
-    except Exception:
-        st.warning("PrizePicks data structure changed—cannot extract projections.")
+    except Exception as e:
+        st.warning(f"PrizePicks data structure changed—cannot extract projections: {e}")
         return pd.DataFrame()
     return pd.DataFrame(player_props)
 
 def calculate_best_bets(props_df, lineups_df):
-    """Recommend props where player is confirmed in lineup (you can expand logic here)."""
+    """Recommend props where player is confirmed in lineup (expand this logic for your model)."""
     best_bets = []
     for _, row in props_df.iterrows():
         team_lineup = lineups_df[lineups_df['Team'].str.contains(row['Team'], case=False, na=False)]
