@@ -1,22 +1,20 @@
 import streamlit as st
 import requests
 import pandas as pd
+from bs4 import BeautifulSoup
 import datetime
+import re
+
+# ------------- API KEYS --------------
+ODDS_API_KEY = "2f4b2a85425623b90862432824f901aa"
 
 st.set_page_config(page_title="MLB AI Prop Bet Finder", layout="wide")
 st.title("MLB AI Prop Bet Finder")
-
-# ------------- API KEYS --------------
-# Get your (free tier) API keys from these sites and insert below:
-ODDS_API_KEY = "YOUR_ODDS_API_KEY"      # https://the-odds-api.com/
-SPORTSDATAIO_KEY = "YOUR_SPORTSDATAIO_KEY"  # https://sportsdata.io/
-# For demonstration, code will run with demo/free endpoints as available
 
 # ------------- FUNCTIONS --------------
 
 @st.cache_data(ttl=1800)
 def get_mlb_lineups():
-    """Get today's MLB lineups from MLB Stats API (official, free)"""
     today = datetime.datetime.now().strftime('%Y-%m-%d')
     url = f"https://statsapi.mlb.com/api/v1/schedule/games/?sportId=1&date={today}"
     schedule = requests.get(url).json()
@@ -66,25 +64,54 @@ def get_oddsapi_props():
                         })
     return pd.DataFrame(all_bets)
 
-def get_sportsdataio_props():
-    """(Optional) For player props—requires API key, limited on free tier."""
-    # Example endpoint: https://api.sportsdata.io/v4/mlb/odds/json/PlayerPropsByDate/{date}
-    # Fill this in if you have a key.
-    return pd.DataFrame()
+@st.cache_data(ttl=600)
+def scrape_prizepicks_mlb_props():
+    """
+    Scrapes MLB player props from PrizePicks. 
+    Will pull (where available): Hits, Home Runs, Total Bases, Strikeouts.
+    """
+    # The PrizePicks MLB page
+    url = "https://app.prizepicks.com/projections?league_id=7"  # 7=MLB
+    headers = {
+        "User-Agent": "Mozilla/5.0"
+    }
+    resp = requests.get(url, headers=headers)
+    if resp.status_code != 200:
+        st.warning("Could not reach PrizePicks (try again later or change User-Agent).")
+        return pd.DataFrame()
+    try:
+        data = resp.json()
+    except Exception:
+        st.warning("PrizePicks API/page structure may have changed.")
+        return pd.DataFrame()
+    included = {item['id']: item for item in data['included']}
+    player_props = []
+    for entry in data['data']:
+        try:
+            # Find player info
+            player_id = entry['relationships']['new_player']['data']['id']
+            player = included.get(player_id, {})
+            player_name = player.get('attributes', {}).get('name', 'Unknown')
+            team = player.get('attributes', {}).get('team', {}).get('name', '')
+            # Get prop info
+            stat_type = entry['attributes']['stat_type']
+            line_score = entry['attributes']['line_score']
+            # Opponent
+            opp_team = entry['attributes'].get('description', '')
+            # Available markets we want
+            if stat_type in ['HITS', 'HOMERUNS', 'TOTAL_BASES', 'STRIKEOUTS']:
+                player_props.append({
+                    'Player': player_name,
+                    'Team': team,
+                    'Prop': stat_type,
+                    'Line': line_score,
+                    'Opponent': opp_team,
+                    'Source': 'PrizePicks'
+                })
+        except Exception:
+            continue
+    return pd.DataFrame(player_props)
 
-def get_demo_player_props():
-    """Demo player props table. Replace with real API/scraper as needed."""
-    # Simulate data
-    return pd.DataFrame({
-        'Player': ['Aaron Judge', 'Ronald Acuna Jr.', 'Shohei Ohtani'],
-        'Team': ['Yankees', 'Braves', 'Dodgers'],
-        'Prop': ['Home Run', 'Hits', 'Total Bases'],
-        'Line': [0.5, 1.5, 2.5],
-        'Odds': [+225, -120, +105],
-        'Opponent': ['Red Sox', 'Mets', 'Giants']
-    })
-
-# Your custom formula/model to determine best bets (replace with your logic)
 def calculate_best_bets(props_df, lineups_df):
     """Example: Only recommend props where player is confirmed in lineup."""
     best_bets = []
@@ -97,9 +124,9 @@ def calculate_best_bets(props_df, lineups_df):
                 'Team': row['Team'],
                 'Prop': row['Prop'],
                 'Line': row['Line'],
-                'Odds': row['Odds'],
                 'Opponent': row['Opponent'],
-                'Win % (Model)': 65 + (row['Odds'] % 10),  # <-- Dummy win%
+                'Source': row['Source'],
+                'Win % (Model)': 65  # <-- Dummy win%, swap for real model
             })
     return pd.DataFrame(best_bets)
 
@@ -119,13 +146,16 @@ if odds_df.empty:
 else:
     st.dataframe(odds_df)
 
-st.header("Today's Top Player Props (Demo/Replace with API/Scraper)")
-player_props_df = get_demo_player_props()
-st.dataframe(player_props_df)
+st.header("PrizePicks MLB Player Props (Hits, HRs, TBs, KOs)")
+prizepicks_df = scrape_prizepicks_mlb_props()
+if prizepicks_df.empty:
+    st.warning("No PrizePicks MLB player props found.")
+else:
+    st.dataframe(prizepicks_df)
 
 # Cross-reference and run model
-st.header("AI-Recommended Best MLB Prop Bets")
-best_bets_df = calculate_best_bets(player_props_df, lineups_df)
+st.header("AI-Recommended Best MLB Prop Bets (PrizePicks + Lineups)")
+best_bets_df = calculate_best_bets(prizepicks_df, lineups_df)
 if best_bets_df.empty:
     st.warning("No best bets found yet. Wait for confirmed lineups and player props.")
 else:
@@ -140,4 +170,3 @@ if filter_team:
     filtered = best_bets_df[best_bets_df['Team'].str.contains(filter_team, case=False, na=False)]
     st.subheader(f"Filtered Best Bets for {filter_team}")
     st.dataframe(filtered)
-
