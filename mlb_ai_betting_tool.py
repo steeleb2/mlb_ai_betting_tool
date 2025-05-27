@@ -119,4 +119,3 @@ with st.expander("Show all players evaluated"):
     st.dataframe(output_df)
 
 st.info("Customize data sources and model logic by editing this script.")
-
