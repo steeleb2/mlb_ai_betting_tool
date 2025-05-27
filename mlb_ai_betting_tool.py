@@ -1,50 +1,41 @@
 import streamlit as st
 import pandas as pd
 import requests
+from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
-from datetime import datetime
 
 st.set_page_config(page_title="MLB Betr Model", layout="wide")
 
-# --- 1. LINEUP SCRAPERS ---
-
+# --- Helper: Rotowire confirmed lineups ---
 def get_rotowire_lineups():
-    """Scrape confirmed lineups from Rotowire."""
     url = "https://www.rotowire.com/baseball/daily-lineups.php"
-    res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'})
-    soup = BeautifulSoup(res.content, 'html.parser')
-    games = soup.find_all("div", class_="lineup is-mlb")
-    lineups = []
-    for game in games:
-        teams = game.find_all("div", class_="lineup__abbr")
-        if not teams or len(teams) < 2:
-            continue
-        team1 = teams[0].text.strip()
-        team2 = teams[1].text.strip()
-        # Rotowire lists both teams, get each team's hitters:
-        hitters = game.find_all("ul", class_="lineup__list")
-        if len(hitters) < 2:
-            continue
-        for team_idx, lineup_ul in enumerate(hitters):
-            for spot, li in enumerate(lineup_ul.find_all("li"), start=1):
-                name_tag = li.find("a", class_="lineup__player-link")
-                if not name_tag:
-                    continue
-                player = name_tag.text.strip()
-                position_tag = li.find("span", class_="lineup__player-position")
-                pos = position_tag.text.strip() if position_tag else ""
-                team = [team1, team2][team_idx]
-                lineups.append({
-                    'Team': team,
-                    'Player': player,
-                    'Batting Order': spot,
-                    'Position': pos,
-                    'Source': "Confirmed"
-                })
-    return pd.DataFrame(lineups)
+    try:
+        page = requests.get(url)
+        soup = BeautifulSoup(page.text, "html.parser")
+        tables = soup.find_all("div", class_="lineup")
+        lineup_rows = []
+        for game in tables:
+            teams = game.find_all("div", class_="lineup__abbr")
+            team_names = [t.text.strip() for t in teams]
+            lineups = game.find_all("ul", class_="lineup__list")
+            for idx, lineup in enumerate(lineups):
+                players = lineup.find_all("li")
+                for spot, p in enumerate(players, start=1):
+                    name = p.text.strip().split('\n')[0]
+                    pos = p.find("span", class_="lineup__pos").text.strip() if p.find("span", class_="lineup__pos") else ""
+                    lineup_rows.append({
+                        'Team': team_names[idx] if idx < len(team_names) else '',
+                        'Player': name,
+                        'Batting Order': spot,
+                        'Position': pos,
+                        'Source': 'Rotowire (Confirmed)'
+                    })
+        return pd.DataFrame(lineup_rows)
+    except Exception:
+        return pd.DataFrame()
 
+# --- Helper: Baseball Press projected lineups ---
 def get_baseballpress_projected_lineups():
-    """Pull projected lineups from Baseball Press public API."""
     url = "https://www.baseballpress.com/api/lineups.json"
     try:
         res = requests.get(url)
@@ -56,7 +47,6 @@ def get_baseballpress_projected_lineups():
         for side in ['home', 'away']:
             t = game.get(side, {})
             team = t.get('abbr', '')
-            status = t.get('status', 'Projected')
             lineup = t.get('players', [])
             for spot, p in enumerate(lineup, start=1):
                 batter = p.get('player_name', '')
@@ -66,29 +56,63 @@ def get_baseballpress_projected_lineups():
                     'Player': batter,
                     'Batting Order': spot,
                     'Position': pos,
-                    'Source': f"BaseballPress ({status})"
+                    'Source': 'Baseball Press (Projected)'
                 })
     return pd.DataFrame(lineup_rows)
 
+# --- Helper: Get yesterday's lineups ---
+def get_yesterdays_lineups():
+    yest = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+    url = f"https://www.baseballpress.com/api/lineups.json?date={yest}"
+    try:
+        res = requests.get(url)
+        data = res.json()
+    except Exception:
+        return pd.DataFrame()
+    lineup_rows = []
+    for game in data.get('data', []):
+        for side in ['home', 'away']:
+            t = game.get(side, {})
+            team = t.get('abbr', '')
+            lineup = t.get('players', [])
+            for spot, p in enumerate(lineup, start=1):
+                batter = p.get('player_name', '')
+                pos = p.get('position', '')
+                lineup_rows.append({
+                    'Team': team,
+                    'Player': batter,
+                    'Batting Order': spot,
+                    'Position': pos,
+                    'Source': "Yesterday's Lineup"
+                })
+    return pd.DataFrame(lineup_rows)
+
+# --- Fallback: pick the best available lineup source ---
 def get_daily_lineups():
-    """Try Rotowire first, fallback to Baseball Press."""
     st.info("Checking Rotowire for confirmed lineups...")
     df_rw = get_rotowire_lineups()
     if not df_rw.empty:
         st.success("Confirmed lineups loaded from Rotowire.")
         return df_rw
-    st.warning("No confirmed lineups yet. Pulling projected lineups from Baseball Press.")
+
+    st.warning("No confirmed lineups. Pulling projected lineups from Baseball Press...")
     df_bp = get_baseballpress_projected_lineups()
     if not df_bp.empty:
         st.success("Projected lineups loaded from Baseball Press.")
         return df_bp
-    st.error("No confirmed or projected lineups available from Rotowire or Baseball Press.")
+
+    st.warning("No projected lineups. Pulling yesterday's lineups as fallback...")
+    df_yd = get_yesterdays_lineups()
+    if not df_yd.empty:
+        st.success("Loaded yesterday's lineups as fallback.")
+        return df_yd
+
+    st.error("No confirmed, projected, or yesterday's lineups available.")
     return pd.DataFrame()
 
-# --- 2. WEATHER SCRAPER ---
-
+# --- Mock: get weather, matchups, historic data as before ---
 def get_daily_weather():
-    # Demo: Replace with a real weather API for each park if needed!
+    # Placeholder: Replace with real API
     return pd.DataFrame({
         'Ballpark': ['Yankee Stadium', 'Truist Park', 'Dodger Stadium'],
         'Temperature (F)': [78, 85, 75],
@@ -96,10 +120,8 @@ def get_daily_weather():
         'Conditions': ['Sunny', 'Cloudy', 'Clear']
     })
 
-# --- 3. MATCHUPS DEMO ---
-
 def get_daily_matchups():
-    # Demo: Replace with real matchup API or scraping if needed
+    # Placeholder: Replace with real API
     return pd.DataFrame({
         'Home': ['Yankees', 'Braves', 'Dodgers'],
         'Away': ['Red Sox', 'Phillies', 'Padres'],
@@ -107,10 +129,8 @@ def get_daily_matchups():
         'Away SP': ['Chris Sale', 'Zack Wheeler', 'Yu Darvish']
     })
 
-# --- 4. HISTORIC DATA ---
-
 def get_historic_data():
-    # Replace with your historic stats file/API!
+    # Placeholder: Replace with your real stats load/API!
     return pd.DataFrame({
         'Player': ['Aaron Judge', 'Ronald Acuna Jr.', 'Shohei Ohtani'],
         'HR %': [0.07, 0.05, 0.06],
@@ -118,60 +138,56 @@ def get_historic_data():
         'Hits %': [0.28, 0.30, 0.27]
     })
 
-# --- 5. MLB Betr MODEL LOGIC ---
-
-def run_mlb_betr_model(lineups, historic_data):
-    # Merge lineups with historic player data on player name
+# --- Model Logic Example ---
+def run_mlb_betr_model(lineups, weather, matchups, historic_data):
     merged = pd.merge(lineups, historic_data, on='Player', how='left')
-    # Fill missing stats with mean or 0 for demo; ideally use latest data
-    for col in ['HR %', 'TB %', 'Hits %']:
-        merged[col] = merged[col].fillna(merged[col].mean())
-    # Calculate Win %: YOUR model logic
-    merged['Win %'] = (merged['HR %'] + merged['TB %'] + merged['Hits %']) / 3 + 0.5
+    merged['Win %'] = (merged['HR %'].fillna(0) + merged['TB %'].fillna(0) + merged['Hits %'].fillna(0)) / 3 + 0.5
     merged = merged.sort_values('Win %', ascending=False).reset_index(drop=True)
-    # Label top 15 Best Play, next 10 Longshot, rest Other
-    n = len(merged)
-    merged['Type'] = ['Best Play']*min(15, n) + ['Longshot']*min(10, max(n-15,0)) + ['Other']*max(n-25,0)
+    merged['Type'] = ['Best Play']*min(15, len(merged)) + ['Longshot']*min(10, max(len(merged)-15, 0)) + ['Other']*max(0, len(merged)-25)
+    merged = merged[['Player', 'Team', 'Batting Order', 'Position', 'Win %', 'Type', 'Source']]
     return merged
 
-# --- 6. STREAMLIT UI ---
-
-st.title("MLB Betr Model: Daily Automated Output")
+# --- Streamlit UI ---
+st.title("MLB Betr: Daily Model Output")
 st.write(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-with st.spinner("Gathering all data..."):
+with st.spinner("Loading data..."):
     lineups = get_daily_lineups()
     if lineups.empty:
+        st.error("No lineups available from any source.")
         st.stop()
     weather = get_daily_weather()
     matchups = get_daily_matchups()
     historic_data = get_historic_data()
-    output_df = run_mlb_betr_model(lineups, historic_data)
+    output_df = run_mlb_betr_model(lineups, weather, matchups, historic_data)
 
-st.subheader("Today's Lineups (by source)")
-st.dataframe(lineups)
-
-st.subheader("Weather (Demo Data)")
+st.subheader("Today's Weather by Ballpark")
 st.dataframe(weather)
 
-st.subheader("Pitching Matchups (Demo Data)")
+st.subheader("Today's Pitching Matchups")
 st.dataframe(matchups)
 
-st.header("Top 15 Best Plays (Win %)")
-st.dataframe(output_df[output_df['Type'] == 'Best Play'].head(15))
+st.header("Starting Lineups (Source in column)")
+st.dataframe(lineups)
 
-st.header("Top 10 Longshot/Variance Plays (Win %)")
-st.dataframe(output_df[output_df['Type'] == 'Longshot'].head(10))
+st.header("Top 15 Best Plays (by Win %)")
+best_plays = output_df[output_df['Type'] == 'Best Play'].head(15).copy()
+st.dataframe(best_plays)
 
+st.header("Top 10 Longshot/Variance Plays (by Win %)")
+longshots = output_df[output_df['Type'] == 'Longshot'].head(10).copy()
+st.dataframe(longshots)
+
+# Download button for CSV
 st.download_button(
-    label="Download Full Results as CSV",
+    label="Download All Results as CSV",
     data=output_df.to_csv(index=False),
     file_name='mlb_betr_model_output.csv',
     mime='text/csv'
 )
 
-with st.expander("All Model Players"):
+with st.expander("Show all players evaluated"):
     st.dataframe(output_df)
 
-st.info("Historic player stats: swap in your full API/data source for true daily output. Lineups auto-pulled from Rotowire (confirmed) and Baseball Press (projected). Weather/matchups shown as demo.")
+st.info("Lineups source displayed in 'Source' column. You can further customize API sources and model logic in this script.")
 
