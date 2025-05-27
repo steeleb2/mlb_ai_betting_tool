@@ -115,6 +115,3 @@ with st.expander("Show all players evaluated"):
 st.info("Customize data sources and model logic by editing this script.")
 
 
-
-**Want the next section written in code? Just ask for your specific model logic and output format.**
-""")
