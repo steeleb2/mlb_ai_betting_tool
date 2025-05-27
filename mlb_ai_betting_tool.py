@@ -3,15 +3,15 @@ import requests
 import pandas as pd
 from bs4 import BeautifulSoup
 import datetime
-import re
+import json
 
-# ------------- API KEYS --------------
+# ----------- API KEYS -------------
 ODDS_API_KEY = "2f4b2a85425623b90862432824f901aa"
 
 st.set_page_config(page_title="MLB AI Prop Bet Finder", layout="wide")
 st.title("MLB AI Prop Bet Finder")
 
-# ------------- FUNCTIONS --------------
+# ----------- DATA SOURCES -------------
 
 @st.cache_data(ttl=1800)
 def get_mlb_lineups():
@@ -65,55 +65,72 @@ def get_oddsapi_props():
     return pd.DataFrame(all_bets)
 
 @st.cache_data(ttl=600)
-def scrape_prizepicks_mlb_props():
+def scrape_prizepicks_mlb_props_html():
     """
-    Scrapes MLB player props from PrizePicks. 
-    Will pull (where available): Hits, Home Runs, Total Bases, Strikeouts.
+    Scrapes MLB player props from PrizePicks' public web page by extracting embedded JSON from HTML.
     """
-    # The PrizePicks MLB page
-    url = "https://app.prizepicks.com/projections?league_id=7"  # 7=MLB
+    url = "https://www.prizepicks.com/lines/mlb"
     headers = {
         "User-Agent": "Mozilla/5.0"
     }
     resp = requests.get(url, headers=headers)
     if resp.status_code != 200:
-        st.warning("Could not reach PrizePicks (try again later or change User-Agent).")
+        st.warning("Could not reach PrizePicks (web scrape).")
+        return pd.DataFrame()
+    # Find embedded JSON data (window.__NUXT__ in <script> tag)
+    soup = BeautifulSoup(resp.text, "lxml")
+    scripts = soup.find_all("script")
+    data_script = None
+    for script in scripts:
+        if "window.__NUXT__=" in script.text:
+            data_script = script.text
+            break
+    if not data_script:
+        st.warning("PrizePicks page structure changed—no JSON found.")
         return pd.DataFrame()
     try:
-        data = resp.json()
+        # Extract the JSON substring
+        json_data = data_script.split("window.__NUXT__=")[-1]
+        if json_data.endswith(";"):
+            json_data = json_data[:-1]
+        data = json.loads(json_data)
     except Exception:
-        st.warning("PrizePicks API/page structure may have changed.")
+        st.warning("Failed to parse PrizePicks embedded JSON.")
         return pd.DataFrame()
-    included = {item['id']: item for item in data['included']}
+
+    # Traverse data structure to get MLB props
     player_props = []
-    for entry in data['data']:
-        try:
-            # Find player info
-            player_id = entry['relationships']['new_player']['data']['id']
-            player = included.get(player_id, {})
-            player_name = player.get('attributes', {}).get('name', 'Unknown')
-            team = player.get('attributes', {}).get('team', {}).get('name', '')
-            # Get prop info
-            stat_type = entry['attributes']['stat_type']
-            line_score = entry['attributes']['line_score']
-            # Opponent
-            opp_team = entry['attributes'].get('description', '')
-            # Available markets we want
-            if stat_type in ['HITS', 'HOMERUNS', 'TOTAL_BASES', 'STRIKEOUTS']:
-                player_props.append({
-                    'Player': player_name,
-                    'Team': team,
-                    'Prop': stat_type,
-                    'Line': line_score,
-                    'Opponent': opp_team,
-                    'Source': 'PrizePicks'
-                })
-        except Exception:
-            continue
+    try:
+        projections = data['state']['projections']
+        included = {item['id']: item for item in data['state']['included']}
+        for proj in projections:
+            try:
+                player_id = proj['relationships']['new_player']['data']['id']
+                player = included.get(player_id, {})
+                player_name = player.get('attributes', {}).get('name', 'Unknown')
+                team = player.get('attributes', {}).get('team', {}).get('name', '')
+                stat_type = proj['attributes']['stat_type']
+                line_score = proj['attributes']['line_score']
+                opp_team = proj['attributes'].get('description', '')
+                # Filter for the props you want
+                if stat_type in ['HITS', 'HOMERUNS', 'TOTAL_BASES', 'STRIKEOUTS']:
+                    player_props.append({
+                        'Player': player_name,
+                        'Team': team,
+                        'Prop': stat_type,
+                        'Line': line_score,
+                        'Opponent': opp_team,
+                        'Source': 'PrizePicks'
+                    })
+            except Exception:
+                continue
+    except Exception:
+        st.warning("PrizePicks data structure changed—cannot extract projections.")
+        return pd.DataFrame()
     return pd.DataFrame(player_props)
 
 def calculate_best_bets(props_df, lineups_df):
-    """Example: Only recommend props where player is confirmed in lineup."""
+    """Recommend props where player is confirmed in lineup (you can expand logic here)."""
     best_bets = []
     for _, row in props_df.iterrows():
         team_lineup = lineups_df[lineups_df['Team'].str.contains(row['Team'], case=False, na=False)]
@@ -130,7 +147,7 @@ def calculate_best_bets(props_df, lineups_df):
             })
     return pd.DataFrame(best_bets)
 
-# ------------- APP MAIN --------------
+# ------------- APP MAIN -------------
 
 st.header("Today's Confirmed MLB Lineups")
 lineups_df = get_mlb_lineups()
@@ -147,13 +164,12 @@ else:
     st.dataframe(odds_df)
 
 st.header("PrizePicks MLB Player Props (Hits, HRs, TBs, KOs)")
-prizepicks_df = scrape_prizepicks_mlb_props()
+prizepicks_df = scrape_prizepicks_mlb_props_html()
 if prizepicks_df.empty:
     st.warning("No PrizePicks MLB player props found.")
 else:
     st.dataframe(prizepicks_df)
 
-# Cross-reference and run model
 st.header("AI-Recommended Best MLB Prop Bets (PrizePicks + Lineups)")
 best_bets_df = calculate_best_bets(prizepicks_df, lineups_df)
 if best_bets_df.empty:
@@ -163,7 +179,7 @@ else:
 
 st.info("Upgrade the model by adding your prop data source and formula for win percentage.")
 
-# ------------- USER INPUTS / FILTERS (OPTIONAL) -------------
+# ------------ USER FILTERS (OPTIONAL) -----------
 st.sidebar.header("Filters")
 filter_team = st.sidebar.text_input("Team (optional)")
 if filter_team:
