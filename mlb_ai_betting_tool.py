@@ -8,10 +8,7 @@ st.set_page_config(page_title="MLB Betr Model", layout="wide")
 # --- 1. Functions to Get Data ---
 
 def get_daily_lineups():
-    # Replace this with your API or scraping logic
-    # Example: data = requests.get("YOUR_LINEUPS_API").json()
-    # Example: return pd.DataFrame(data)
-    # For now, mock data:
+    # Placeholder/mock data, replace with your actual data source
     return pd.DataFrame({
         'Player': ['Aaron Judge', 'Ronald Acuna Jr.', 'Shohei Ohtani'],
         'Team': ['Yankees', 'Braves', 'Dodgers'],
@@ -20,7 +17,6 @@ def get_daily_lineups():
     })
 
 def get_daily_weather():
-    # Replace this with a real weather API call
     return pd.DataFrame({
         'Ballpark': ['Yankee Stadium', 'Truist Park', 'Dodger Stadium'],
         'Temperature (F)': [78, 85, 75],
@@ -29,7 +25,6 @@ def get_daily_weather():
     })
 
 def get_daily_matchups():
-    # Replace this with your real matchup API/scrape
     return pd.DataFrame({
         'Home': ['Yankees', 'Braves', 'Dodgers'],
         'Away': ['Red Sox', 'Phillies', 'Padres'],
@@ -38,8 +33,6 @@ def get_daily_matchups():
     })
 
 def get_historic_data():
-    # Load your historical stats file or database here
-    # Example: return pd.read_csv("historic_stats.csv")
     return pd.DataFrame({
         'Player': ['Aaron Judge', 'Ronald Acuna Jr.', 'Shohei Ohtani'],
         'HR %': [0.07, 0.05, 0.06],
@@ -47,34 +40,49 @@ def get_historic_data():
         'Hits %': [0.28, 0.30, 0.27]
     })
 
-# --- 2. Your Model Logic Here ---
+# --- 2. MODEL LOGIC WITH HARDCODED FORMULA ---
 
 def run_mlb_betr_model(lineups, weather, matchups, historic_data):
-    # Here is where you implement YOUR full model logic.
-    # Use real statistical calculations, historical data, live inputs, etc.
-
-    # Example: merge lineups with historic data (fake merge here)
     merged = pd.merge(lineups, historic_data, on='Player', how='left')
 
-    # Example "win %" calculation, replace with your formulas!
-    merged['Win %'] = (merged['HR %'] + merged['TB %'] + merged['Hits %']) / 3 + 0.5  # Fake boost for demo
+    # --- HARDCODED WIN % FORMULA ---
+    # (You can expand this as you add more data)
+    # Base: average of HR%, TB%, Hits%
+    merged['BaseWin'] = (merged['HR %'] + merged['TB %'] + merged['Hits %']) / 3
 
-    # Flag variance plays (e.g. lower historic %, or outside top 15)
+    # Batting order bonus (leadoff, #2, #3 hitters get a small bonus)
+    merged['OrderBonus'] = merged['Batting Order'].apply(lambda x: 0.03 if x in [1,2,3] else 0)
+
+    # Add temperature factor (warmer games, higher bonus), for demo
+    temp_map = dict(zip(weather['Ballpark'], weather['Temperature (F)']))
+    merged['TempBonus'] = merged['Team'].map({
+        'Yankees': temp_map.get('Yankee Stadium', 70),
+        'Braves': temp_map.get('Truist Park', 70),
+        'Dodgers': temp_map.get('Dodger Stadium', 70)
+    })
+    merged['TempBonus'] = merged['TempBonus'].apply(lambda t: 0.02 if t >= 80 else 0)
+
+    # Final Win % (all bonuses and base win rate, example logic)
+    merged['Win %'] = merged['BaseWin'] + merged['OrderBonus'] + merged['TempBonus']
+
+    # Output sort and type
     merged = merged.sort_values('Win %', ascending=False).reset_index(drop=True)
-    merged['Type'] = ['Best Play']*15 + ['Longshot']*(len(merged)-15) if len(merged) > 15 else ['Best Play']*len(merged)
-    
-    # If not enough fake data, pad with fake players for demo
+    merged['Type'] = ['Best Play']*15 + ['Longshot']*10 + ['Other']*(len(merged)-25)
+    merged.loc[merged.index >= 15, 'Type'] = 'Longshot'
+    merged.loc[merged.index >= 25, 'Type'] = 'Other'
+
+    # Pad out to 25 for demo
     while len(merged) < 25:
         merged.loc[len(merged)] = [
-            f"Player {len(merged)+1}", "TeamX", len(merged)%9+1, "OF", 0.03, 0.27, 0.19, 0.51-(len(merged)*0.01), "Longshot"
+            f"Player {len(merged)+1}", "TeamX", (len(merged)%9)+1, "OF", 0.02, 0.22, 0.16, 0.13, 0, 0, 0.05, "Longshot"
         ]
 
-    # Only keep columns needed for display
+    # Final display columns
     merged = merged[['Player', 'Team', 'Batting Order', 'Position', 'Win %', 'Type']]
 
     return merged
 
-# --- 3. Streamlit App UI ---
+# --- 3. STREAMLIT APP UI ---
 
 st.title("MLB Betr: Daily Model Output")
 st.write(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -93,14 +101,13 @@ st.subheader("Today's Pitching Matchups")
 st.dataframe(matchups)
 
 st.header("Top 15 Best Plays (by Win %)")
-best_plays = output_df[output_df['Type'] == 'Best Play'].head(15).copy()
+best_plays = output_df[output_df['Type'] == 'Best Play'].head(15)
 st.dataframe(best_plays)
 
 st.header("Top 10 Longshot/Variance Plays (by Win %)")
-longshots = output_df[output_df['Type'] == 'Longshot'].head(10).copy()
+longshots = output_df[output_df['Type'] == 'Longshot'].head(10)
 st.dataframe(longshots)
 
-# Optional: Download button for CSV
 st.download_button(
     label="Download All Results as CSV",
     data=output_df.to_csv(index=False),
@@ -108,10 +115,8 @@ st.download_button(
     mime='text/csv'
 )
 
-# Optional: Expand to show all players
 with st.expander("Show all players evaluated"):
     st.dataframe(output_df)
 
 st.info("Customize data sources and model logic by editing this script.")
-
 
