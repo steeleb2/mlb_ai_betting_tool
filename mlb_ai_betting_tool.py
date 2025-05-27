@@ -1,193 +1,143 @@
 import streamlit as st
-import pandas as pd
 import requests
-from datetime import datetime, timedelta
-from bs4 import BeautifulSoup
+import pandas as pd
+import datetime
 
-st.set_page_config(page_title="MLB Betr Model", layout="wide")
+st.set_page_config(page_title="MLB AI Prop Bet Finder", layout="wide")
+st.title("MLB AI Prop Bet Finder")
 
-# --- Helper: Rotowire confirmed lineups ---
-def get_rotowire_lineups():
-    url = "https://www.rotowire.com/baseball/daily-lineups.php"
-    try:
-        page = requests.get(url)
-        soup = BeautifulSoup(page.text, "html.parser")
-        tables = soup.find_all("div", class_="lineup")
-        lineup_rows = []
-        for game in tables:
-            teams = game.find_all("div", class_="lineup__abbr")
-            team_names = [t.text.strip() for t in teams]
-            lineups = game.find_all("ul", class_="lineup__list")
-            for idx, lineup in enumerate(lineups):
-                players = lineup.find_all("li")
-                for spot, p in enumerate(players, start=1):
-                    name = p.text.strip().split('\n')[0]
-                    pos = p.find("span", class_="lineup__pos").text.strip() if p.find("span", class_="lineup__pos") else ""
-                    lineup_rows.append({
-                        'Team': team_names[idx] if idx < len(team_names) else '',
-                        'Player': name,
-                        'Batting Order': spot,
-                        'Position': pos,
-                        'Source': 'Rotowire (Confirmed)'
-                    })
-        return pd.DataFrame(lineup_rows)
-    except Exception:
+# ------------- API KEYS --------------
+# Get your (free tier) API keys from these sites and insert below:
+ODDS_API_KEY = "YOUR_ODDS_API_KEY"      # https://the-odds-api.com/
+SPORTSDATAIO_KEY = "YOUR_SPORTSDATAIO_KEY"  # https://sportsdata.io/
+# For demonstration, code will run with demo/free endpoints as available
+
+# ------------- FUNCTIONS --------------
+
+@st.cache_data(ttl=1800)
+def get_mlb_lineups():
+    """Get today's MLB lineups from MLB Stats API (official, free)"""
+    today = datetime.datetime.now().strftime('%Y-%m-%d')
+    url = f"https://statsapi.mlb.com/api/v1/schedule/games/?sportId=1&date={today}"
+    schedule = requests.get(url).json()
+    game_ids = [g['gamePk'] for d in schedule.get('dates', []) for g in d.get('games', [])]
+    lineups = []
+    for game_id in game_ids:
+        url2 = f"https://statsapi.mlb.com/api/v1/game/{game_id}/boxscore"
+        resp = requests.get(url2).json()
+        for team_type in ['home', 'away']:
+            team = resp['teams'][team_type]['team']['name']
+            try:
+                players = [
+                    p['person']['fullName']
+                    for p in resp['teams'][team_type]['players'].values()
+                    if 'battingOrder' in p and p['battingOrder'] <= 900
+                ]
+            except Exception:
+                players = []
+            lineups.append({'Team': team, 'Lineup': players, 'GameID': game_id})
+    return pd.DataFrame(lineups)
+
+@st.cache_data(ttl=600)
+def get_oddsapi_props():
+    """Pulls MLB odds (Moneyline, O/U, Spreads) from The Odds API"""
+    url = f"https://api.the-odds-api.com/v4/sports/baseball_mlb/odds/?apiKey={ODDS_API_KEY}&regions=us&markets=spreads,totals,h2h"
+    resp = requests.get(url)
+    if resp.status_code != 200:
+        st.warning("Odds API quota reached or invalid key.")
         return pd.DataFrame()
+    data = resp.json()
+    all_bets = []
+    for game in data:
+        matchup = f"{game['home_team']} vs {game['away_team']}"
+        commence = game.get('commence_time', '')
+        for bookmaker in game.get('bookmakers', []):
+            for market in bookmaker['markets']:
+                if market['key'] in ['spreads', 'totals', 'h2h']:
+                    for outcome in market['outcomes']:
+                        all_bets.append({
+                            'Matchup': matchup,
+                            'Start': commence,
+                            'Type': market['key'],
+                            'Team': outcome.get('name', ''),
+                            'Line': outcome.get('point', ''),
+                            'Odds': outcome.get('price', ''),
+                            'Book': bookmaker.get('title', '')
+                        })
+    return pd.DataFrame(all_bets)
 
-# --- Helper: Baseball Press projected lineups ---
-def get_baseballpress_projected_lineups():
-    url = "https://www.baseballpress.com/api/lineups.json"
-    try:
-        res = requests.get(url)
-        data = res.json()
-    except Exception:
-        return pd.DataFrame()
-    lineup_rows = []
-    for game in data.get('data', []):
-        for side in ['home', 'away']:
-            t = game.get(side, {})
-            team = t.get('abbr', '')
-            lineup = t.get('players', [])
-            for spot, p in enumerate(lineup, start=1):
-                batter = p.get('player_name', '')
-                pos = p.get('position', '')
-                lineup_rows.append({
-                    'Team': team,
-                    'Player': batter,
-                    'Batting Order': spot,
-                    'Position': pos,
-                    'Source': 'Baseball Press (Projected)'
-                })
-    return pd.DataFrame(lineup_rows)
-
-# --- Helper: Get yesterday's lineups ---
-def get_yesterdays_lineups():
-    yest = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
-    url = f"https://www.baseballpress.com/api/lineups.json?date={yest}"
-    try:
-        res = requests.get(url)
-        data = res.json()
-    except Exception:
-        return pd.DataFrame()
-    lineup_rows = []
-    for game in data.get('data', []):
-        for side in ['home', 'away']:
-            t = game.get(side, {})
-            team = t.get('abbr', '')
-            lineup = t.get('players', [])
-            for spot, p in enumerate(lineup, start=1):
-                batter = p.get('player_name', '')
-                pos = p.get('position', '')
-                lineup_rows.append({
-                    'Team': team,
-                    'Player': batter,
-                    'Batting Order': spot,
-                    'Position': pos,
-                    'Source': "Yesterday's Lineup"
-                })
-    return pd.DataFrame(lineup_rows)
-
-# --- Fallback: pick the best available lineup source ---
-def get_daily_lineups():
-    st.info("Checking Rotowire for confirmed lineups...")
-    df_rw = get_rotowire_lineups()
-    if not df_rw.empty:
-        st.success("Confirmed lineups loaded from Rotowire.")
-        return df_rw
-
-    st.warning("No confirmed lineups. Pulling projected lineups from Baseball Press...")
-    df_bp = get_baseballpress_projected_lineups()
-    if not df_bp.empty:
-        st.success("Projected lineups loaded from Baseball Press.")
-        return df_bp
-
-    st.warning("No projected lineups. Pulling yesterday's lineups as fallback...")
-    df_yd = get_yesterdays_lineups()
-    if not df_yd.empty:
-        st.success("Loaded yesterday's lineups as fallback.")
-        return df_yd
-
-    st.error("No confirmed, projected, or yesterday's lineups available.")
+def get_sportsdataio_props():
+    """(Optional) For player props—requires API key, limited on free tier."""
+    # Example endpoint: https://api.sportsdata.io/v4/mlb/odds/json/PlayerPropsByDate/{date}
+    # Fill this in if you have a key.
     return pd.DataFrame()
 
-# --- Mock: get weather, matchups, historic data as before ---
-def get_daily_weather():
-    # Placeholder: Replace with real API
-    return pd.DataFrame({
-        'Ballpark': ['Yankee Stadium', 'Truist Park', 'Dodger Stadium'],
-        'Temperature (F)': [78, 85, 75],
-        'Wind': ['8 mph Out', '5 mph In', '2 mph L to R'],
-        'Conditions': ['Sunny', 'Cloudy', 'Clear']
-    })
-
-def get_daily_matchups():
-    # Placeholder: Replace with real API
-    return pd.DataFrame({
-        'Home': ['Yankees', 'Braves', 'Dodgers'],
-        'Away': ['Red Sox', 'Phillies', 'Padres'],
-        'Home SP': ['Gerrit Cole', 'Max Fried', 'Tyler Glasnow'],
-        'Away SP': ['Chris Sale', 'Zack Wheeler', 'Yu Darvish']
-    })
-
-def get_historic_data():
-    # Placeholder: Replace with your real stats load/API!
+def get_demo_player_props():
+    """Demo player props table. Replace with real API/scraper as needed."""
+    # Simulate data
     return pd.DataFrame({
         'Player': ['Aaron Judge', 'Ronald Acuna Jr.', 'Shohei Ohtani'],
-        'HR %': [0.07, 0.05, 0.06],
-        'TB %': [0.45, 0.38, 0.41],
-        'Hits %': [0.28, 0.30, 0.27]
+        'Team': ['Yankees', 'Braves', 'Dodgers'],
+        'Prop': ['Home Run', 'Hits', 'Total Bases'],
+        'Line': [0.5, 1.5, 2.5],
+        'Odds': [+225, -120, +105],
+        'Opponent': ['Red Sox', 'Mets', 'Giants']
     })
 
-# --- Model Logic Example ---
-def run_mlb_betr_model(lineups, weather, matchups, historic_data):
-    merged = pd.merge(lineups, historic_data, on='Player', how='left')
-    merged['Win %'] = (merged['HR %'].fillna(0) + merged['TB %'].fillna(0) + merged['Hits %'].fillna(0)) / 3 + 0.5
-    merged = merged.sort_values('Win %', ascending=False).reset_index(drop=True)
-    merged['Type'] = ['Best Play']*min(15, len(merged)) + ['Longshot']*min(10, max(len(merged)-15, 0)) + ['Other']*max(0, len(merged)-25)
-    merged = merged[['Player', 'Team', 'Batting Order', 'Position', 'Win %', 'Type', 'Source']]
-    return merged
+# Your custom formula/model to determine best bets (replace with your logic)
+def calculate_best_bets(props_df, lineups_df):
+    """Example: Only recommend props where player is confirmed in lineup."""
+    best_bets = []
+    for _, row in props_df.iterrows():
+        team_lineup = lineups_df[lineups_df['Team'].str.contains(row['Team'], case=False, na=False)]
+        if not team_lineup.empty and any(row['Player'] in lineup for lineup in team_lineup['Lineup']):
+            # Placeholder: Add your real win% model here
+            best_bets.append({
+                'Player': row['Player'],
+                'Team': row['Team'],
+                'Prop': row['Prop'],
+                'Line': row['Line'],
+                'Odds': row['Odds'],
+                'Opponent': row['Opponent'],
+                'Win % (Model)': 65 + (row['Odds'] % 10),  # <-- Dummy win%
+            })
+    return pd.DataFrame(best_bets)
 
-# --- Streamlit UI ---
-st.title("MLB Betr: Daily Model Output")
-st.write(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+# ------------- APP MAIN --------------
 
-with st.spinner("Loading data..."):
-    lineups = get_daily_lineups()
-    if lineups.empty:
-        st.error("No lineups available from any source.")
-        st.stop()
-    weather = get_daily_weather()
-    matchups = get_daily_matchups()
-    historic_data = get_historic_data()
-    output_df = run_mlb_betr_model(lineups, weather, matchups, historic_data)
+st.header("Today's Confirmed MLB Lineups")
+lineups_df = get_mlb_lineups()
+if lineups_df.empty:
+    st.warning("No confirmed lineups yet. Try again later.")
+else:
+    st.dataframe(lineups_df)
 
-st.subheader("Today's Weather by Ballpark")
-st.dataframe(weather)
+st.header("Today's MLB Moneyline, Spread, and O/U Bets (from OddsAPI)")
+odds_df = get_oddsapi_props()
+if odds_df.empty:
+    st.warning("OddsAPI data not available or no games today.")
+else:
+    st.dataframe(odds_df)
 
-st.subheader("Today's Pitching Matchups")
-st.dataframe(matchups)
+st.header("Today's Top Player Props (Demo/Replace with API/Scraper)")
+player_props_df = get_demo_player_props()
+st.dataframe(player_props_df)
 
-st.header("Starting Lineups (Source in column)")
-st.dataframe(lineups)
+# Cross-reference and run model
+st.header("AI-Recommended Best MLB Prop Bets")
+best_bets_df = calculate_best_bets(player_props_df, lineups_df)
+if best_bets_df.empty:
+    st.warning("No best bets found yet. Wait for confirmed lineups and player props.")
+else:
+    st.dataframe(best_bets_df)
 
-st.header("Top 15 Best Plays (by Win %)")
-best_plays = output_df[output_df['Type'] == 'Best Play'].head(15).copy()
-st.dataframe(best_plays)
+st.info("Upgrade the model by adding your prop data source and formula for win percentage.")
 
-st.header("Top 10 Longshot/Variance Plays (by Win %)")
-longshots = output_df[output_df['Type'] == 'Longshot'].head(10).copy()
-st.dataframe(longshots)
-
-# Download button for CSV
-st.download_button(
-    label="Download All Results as CSV",
-    data=output_df.to_csv(index=False),
-    file_name='mlb_betr_model_output.csv',
-    mime='text/csv'
-)
-
-with st.expander("Show all players evaluated"):
-    st.dataframe(output_df)
-
-st.info("Lineups source displayed in 'Source' column. You can further customize API sources and model logic in this script.")
+# ------------- USER INPUTS / FILTERS (OPTIONAL) -------------
+st.sidebar.header("Filters")
+filter_team = st.sidebar.text_input("Team (optional)")
+if filter_team:
+    filtered = best_bets_df[best_bets_df['Team'].str.contains(filter_team, case=False, na=False)]
+    st.subheader(f"Filtered Best Bets for {filter_team}")
+    st.dataframe(filtered)
 
