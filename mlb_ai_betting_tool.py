@@ -5,108 +5,99 @@ from datetime import datetime
 
 st.set_page_config(page_title="MLB Betr Model", layout="wide")
 
-# --- 1. Functions to Get Data ---
+# --- 1. Pull today's MLB schedule with lineups/probables ---
 
-def get_daily_lineups():
-    # Replace with real logic or API
-    return pd.DataFrame({
-        'Player': ['Aaron Judge', 'Ronald Acuna Jr.', 'Shohei Ohtani'],
-        'Team': ['Yankees', 'Braves', 'Dodgers'],
-        'Batting Order': [2, 1, 3],
-        'Position': ['RF', 'CF', 'DH']
-    })
+today = datetime.now().strftime('%Y-%m-%d')
+mlb_url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&date={today}&expand=schedule.lineups,schedule.probablePitchers"
 
-def get_daily_weather():
-    # Replace with real logic or API
-    return pd.DataFrame({
-        'Ballpark': ['Yankee Stadium', 'Truist Park', 'Dodger Stadium'],
-        'Temperature (F)': [78, 85, 75],
-        'Wind': ['8 mph Out', '5 mph In', '2 mph L to R'],
-        'Conditions': ['Sunny', 'Cloudy', 'Clear']
-    })
+resp = requests.get(mlb_url)
+data = resp.json()
 
-def get_daily_matchups():
-    # Replace with real logic or API
-    return pd.DataFrame({
-        'Home': ['Yankees', 'Braves', 'Dodgers'],
-        'Away': ['Red Sox', 'Phillies', 'Padres'],
-        'Home SP': ['Gerrit Cole', 'Max Fried', 'Tyler Glasnow'],
-        'Away SP': ['Chris Sale', 'Zack Wheeler', 'Yu Darvish']
-    })
+games = data.get('dates', [])[0].get('games', []) if data.get('dates') else []
 
-def get_historic_data():
-    # Replace with real logic or file/database
-    return pd.DataFrame({
-        'Player': ['Aaron Judge', 'Ronald Acuna Jr.', 'Shohei Ohtani'],
-        'HR %': [0.07, 0.05, 0.06],
-        'TB %': [0.45, 0.38, 0.41],
-        'Hits %': [0.28, 0.30, 0.27]
-    })
-
-# --- 2. Your Model Logic Here ---
-
-def run_mlb_betr_model(lineups, weather, matchups, historic_data):
-    # Merge lineups with historic data
-    merged = pd.merge(lineups, historic_data, on='Player', how='left')
-
-    # Example "Win %" calculation (customize with your formula as needed)
-    merged['Win %'] = (merged['HR %'] + merged['TB %'] + merged['Hits %']) / 3 + 0.5  # Demo logic
-
-    # Sort and assign type labels for output
-    merged = merged.sort_values('Win %', ascending=False).reset_index(drop=True)
-    merged['Type'] = ""
-    merged.loc[merged.index < 15, 'Type'] = "Best Play"
-    merged.loc[(merged.index >= 15) & (merged.index < 25), 'Type'] = "Longshot"
-    merged.loc[merged.index >= 25, 'Type'] = "Other"
-
-    # Pad with fake players for demo if not enough rows
-    while len(merged) < 25:
-        merged.loc[len(merged)] = [
-            f"Player {len(merged)+1}", "TeamX", (len(merged)%9)+1, "OF",
-            0.03, 0.27, 0.19, 0.51-(len(merged)*0.01), "Longshot"
+def extract_lineup(lineup_data):
+    if not lineup_data:
+        return []
+    try:
+        batting_order = sorted(
+            [p for p in lineup_data['bats']],
+            key=lambda x: x['battingOrder']
+        )
+        return [
+            {
+                "Spot": p['battingOrder'],
+                "Player": p['fullName'],
+                "Position": p['position']['abbreviation']
+            }
+            for p in batting_order
         ]
+    except Exception as e:
+        return []
 
-    # Keep only relevant columns
-    merged = merged[['Player', 'Team', 'Batting Order', 'Position', 'Win %', 'Type']]
+# --- 2. Parse and display games, starters, lineups ---
 
-    return merged
+games_table = []
+full_lineups = []
 
-# --- 3. Streamlit App UI ---
+for game in games:
+    game_info = {
+        "Game": f"{game['teams']['away']['team']['name']} @ {game['teams']['home']['team']['name']}",
+        "Start Time (ET)": pd.to_datetime(game['gameDate']).tz_convert('US/Eastern').strftime('%I:%M %p'),
+        "Home Starter": game['teams']['home'].get('probablePitcher', {}).get('fullName', 'TBD'),
+        "Away Starter": game['teams']['away'].get('probablePitcher', {}).get('fullName', 'TBD')
+    }
+    games_table.append(game_info)
 
-st.title("MLB Betr: Daily Model Output")
-st.write(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    # Away lineup
+    away_lineup = game.get('lineups', {}).get('away', {})
+    if away_lineup and 'bats' in away_lineup:
+        full_lineups.append({
+            "Team": game['teams']['away']['team']['name'],
+            "Type": "Away",
+            "Lineup": extract_lineup(away_lineup)
+        })
+    # Home lineup
+    home_lineup = game.get('lineups', {}).get('home', {})
+    if home_lineup and 'bats' in home_lineup:
+        full_lineups.append({
+            "Team": game['teams']['home']['team']['name'],
+            "Type": "Home",
+            "Lineup": extract_lineup(home_lineup)
+        })
 
-with st.spinner("Loading data..."):
-    lineups = get_daily_lineups()
-    weather = get_daily_weather()
-    matchups = get_daily_matchups()
-    historic_data = get_historic_data()
-    output_df = run_mlb_betr_model(lineups, weather, matchups, historic_data)
+games_df = pd.DataFrame(games_table)
 
-st.subheader("Today's Weather by Ballpark")
-st.dataframe(weather)
+# --- 3. Streamlit Display ---
 
-st.subheader("Today's Pitching Matchups")
-st.dataframe(matchups)
+st.title("MLB Betr Model - Live MLB Data")
+st.caption(f"Auto-pulled from MLB Stats API. Last update: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-st.header("Top 15 Best Plays (by Win %)")
-best_plays = output_df[output_df['Type'] == 'Best Play'].head(15)
-st.dataframe(best_plays)
+st.header("Today's Games & Probable Starters")
+st.dataframe(games_df)
 
-st.header("Top 10 Longshot/Variance Plays (by Win %)")
-longshots = output_df[output_df['Type'] == 'Longshot'].head(10)
-st.dataframe(longshots)
+# Show starting lineups if available
+if full_lineups:
+    st.header("Posted Starting Lineups (Live Updates)")
+    for lineup in full_lineups:
+        st.subheader(f"{lineup['Team']} ({lineup['Type']})")
+        st.table(pd.DataFrame(lineup['Lineup']))
+else:
+    st.info("No official lineups posted yet for today's games. Lineups typically become available 3–5 hours before first pitch.")
 
-# Download all results as CSV
-st.download_button(
-    label="Download All Results as CSV",
-    data=output_df.to_csv(index=False),
-    file_name='mlb_betr_model_output.csv',
-    mime='text/csv'
-)
+# --- 4. (OPTIONAL) Insert your Model Logic Here ---
 
-with st.expander("Show all players evaluated"):
-    st.dataframe(output_df)
+st.header("Your Custom Model Output")
+st.warning("Add your model logic here! Merge lineups, stats, weather, history, and output your top 15/10 plays below.")
 
-st.info("Customize data sources and model logic by editing this script.")
+# --- 5. (OPTIONAL) Download Button for Raw Data ---
+
+if st.button("Download Raw Games Data"):
+    st.download_button(
+        label="Download as CSV",
+        data=games_df.to_csv(index=False),
+        file_name='mlb_games_today.csv',
+        mime='text/csv'
+    )
+
+st.caption("Powered by MLB Stats API. For custom output/modeling, add logic below this line in the script.")
 
