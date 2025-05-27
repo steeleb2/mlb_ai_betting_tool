@@ -1,5 +1,2 @@
-streamlit
-requests
-pandas
-beautifulsoup4
-lxml
+pip install pandas numpy scikit-learn xgboost requests beautifulsoup4 streamlit joblib python-dotenv
+
